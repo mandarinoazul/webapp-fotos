@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tinder de Fotos (Supabase)</title>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <style>
+        :root { --bg: #f3f4f6; --primary: #3b82f6; --success: #10b981; --danger: #ef4444; --text: #1f2937; }
+        body { font-family: sans-serif; background: var(--bg); color: var(--text); display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; }
+        .container { background: white; padding: 2rem; border-radius: 1rem; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1); max-width: 500px; width: 90%; text-align: center; }
+        .hidden { display: none !important; }
+        #media-viewer { width: 100%; height: 400px; display: flex; justify-content: center; align-items: center; background: #000; border-radius: 0.5rem; overflow: hidden; margin: 1rem 0; }
+        #media-viewer img, #media-viewer video { max-width: 100%; max-height: 100%; object-fit: contain; }
+        .controls { display: flex; justify-content: space-between; gap: 1rem; }
+        button { flex: 1; padding: 1rem; border: none; border-radius: 0.5rem; font-size: 1.1rem; font-weight: bold; cursor: pointer; color: white; }
+        button:active { transform: scale(0.95); }
+        #btn-discard { background-color: var(--danger); }
+        #btn-keep { background-color: var(--success); }
+        .progress-bar { width: 100%; background: #e5e7eb; border-radius: 0.5rem; overflow: hidden; margin: 1rem 0; }
+        .progress-fill { height: 10px; background: var(--primary); width: 0%; transition: width 0.2s; }
+        .share-box { background: #eff6ff; padding: 1rem; border-radius: 0.5rem; border: 1px dashed var(--primary); margin-top: 1rem; word-break: break-all; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div id="step-upload">
+            <h2>📁 Sube la carpeta a Supabase</h2>
+            <input type="file" id="folder-input" webkitdirectory directory multiple>
+            <div id="upload-status" class="hidden">
+                <p id="upload-text">Subiendo archivos...</p>
+                <div class="progress-bar"><div id="upload-progress" class="progress-fill"></div></div>
+            </div>
+        </div>
+
+        <div id="step-viewer" class="hidden">
+            <h3 id="progress-text">Cargando...</h3>
+            <div id="media-viewer"></div>
+            <div class="controls">
+                <button id="btn-discard">❌ Descartar</button>
+                <button id="btn-keep">✅ Conservar</button>
+            </div>
+        </div>
+
+        <div id="step-finished" class="hidden">
+            <h2>🎉 ¡Clasificación terminada!</h2>
+            <p>Las decisiones se guardaron en la base de datos.</p>
+        </div>
+    </div>
+
+    <script>
+        // ==========================================
+        // 1. PEGA AQUÍ TUS CLAVES DE SUPABASE
+        // ==========================================
+        const SUPABASE_URL = 'https://cvpfcmqmtoqfnfvztynf.supabase.co';
+        const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImN2cGZjbXFtdG9xZm5mdnp0eW5mIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODMzNTU5OTYsImV4cCI6MjA5ODkzMTk5Nn0.xdIn8suwbW0_OPQjRjxrXyksH_EY-uxYx6_4NA-IVgo';
+        
+        // Inicializamos el cliente con el nombre correcto para evitar el choque de variables
+        const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+        let sessionID = "";
+        let mediaUrls = [];
+        let currentIndex = 0;
+        let currentSessionData = null;
+
+        const stepUpload = document.getElementById('step-upload');
+        const stepViewer = document.getElementById('step-viewer');
+        const stepFinished = document.getElementById('step-finished');
+        const folderInput = document.getElementById('folder-input');
+        const uploadStatus = document.getElementById('upload-status');
+        const uploadProgress = document.getElementById('upload-progress');
+        const uploadText = document.getElementById('upload-text');
+        const mediaViewer = document.getElementById('media-viewer');
+        const progressText = document.getElementById('progress-text');
+
+        // Detectar si el usuario entró con un link generado
+        const urlParams = new URLSearchParams(window.location.search);
+        const idFromUrl = urlParams.get('id');
+
+        if (idFromUrl) {
+            sessionID = idFromUrl;
+            stepUpload.classList.add('hidden');
+            loadSessionData();
+        }
+
+        // Evento: Seleccionar carpeta y subir archivos
+        folderInput.addEventListener('change', async (e) => {
+            const files = Array.from(e.target.files).filter(f => f.type.startsWith('image/') || f.type.startsWith('video/'));
+            if (files.length === 0) return alert("No hay imágenes o videos válidos.");
+
+            sessionID = "sesion_" + Date.now();
+            uploadStatus.classList.remove('hidden');
+            folderInput.classList.add('hidden');
+
+            let uploadedCount = 0;
+            const urlsList = [];
+
+            // Subir al Storage de Supabase (Bucket 'fotos')
+            for (let file of files) {
+                try {
+                    const filePath = `${sessionID}/${file.name}`;
+                    await supabaseClient.storage.from('fotos').upload(filePath, file);
+                    const { data } = supabaseClient.storage.from('fotos').getPublicUrl(filePath);
+                    urlsList.push({ name: file.name, url: data.publicUrl, type: file.type });
+                } catch (err) { 
+                    console.error("Error al subir:", err); 
+                }
+                
+                uploadedCount++;
+                uploadProgress.style.width = Math.round((uploadedCount / files.length) * 100) + "%";
+                uploadText.innerText = `Subiendo: ${uploadedCount} de ${files.length}...`;
+            }
+
+            // Crear el registro en la base de datos (Tabla 'sesiones')
+            await supabaseClient.from('sesiones').insert([{ 
+                id: sessionID, 
+                archivos: urlsList, 
+                conservados: [], 
+                descartados: [] 
+            }]);
+
+            // Generar el link para compartir
+            const shareUrl = `${window.location.origin}${window.location.pathname}?id=${sessionID}`;
+            stepUpload.innerHTML = `
+                <h2>🎉 ¡Subida lista!</h2>
+                <p>Mándale este link a tu amigo:</p>
+                <div class="share-box"><strong>${shareUrl}</strong></div>
+            `;
+        });
+
+        // Evento: Cargar datos desde la base de datos para clasificar
+        async function loadSessionData() {
+            const { data, error } = await supabaseClient.from('sesiones').select('*').eq('id', sessionID).single();
+            if (data) {
+                currentSessionData = data;
+                mediaUrls = data.archivos;
+                stepViewer.classList.remove('hidden');
+                showCurrentMedia();
+            } else {
+                alert("La sesión no existe o hubo un error.");
+            }
+        }
+
+        // Mostrar la foto/video actual
+        function showCurrentMedia() {
+            if (currentIndex >= mediaUrls.length) {
+                stepViewer.classList.add('hidden');
+                stepFinished.classList.remove('hidden');
+                return;
+            }
+            const item = mediaUrls[currentIndex];
+            progressText.innerText = `Archivo ${currentIndex + 1} de ${mediaUrls.length}`;
+            mediaViewer.innerHTML = '';
+
+            if (item.type.startsWith('image/')) {
+                const img = document.createElement('img'); 
+                img.src = item.url; 
+                mediaViewer.appendChild(img);
+            } else {
+                const video = document.createElement('video'); 
+                video.src = item.url; 
+                video.controls = true; 
+                video.autoplay = true; 
+                video.muted = true; 
+                mediaViewer.appendChild(video);
+            }
+        }
+
+        // Registrar la decisión de Swipe
+        async function swipe(action) {
+            const itemActual = mediaUrls[currentIndex];
+            const key = action === 'keep' ? 'conservados' : 'descartados';
+            
+            currentSessionData[key].push(itemActual.name);
+            await supabaseClient.from('sesiones').update({ [key]: currentSessionData[key] }).eq('id', sessionID);
+
+            currentIndex++;
+            showCurrentMedia();
+        }
+
+        // Controles de botones y teclado
+        document.getElementById('btn-discard').addEventListener('click', () => swipe('discard'));
+        document.getElementById('btn-keep').addEventListener('click', () => swipe('keep'));
+        document.addEventListener('keydown', (e) => {
+            if (stepViewer.classList.contains('hidden')) return;
+            if (e.key === 'ArrowLeft') swipe('discard');
+            if (e.key === 'ArrowRight') swipe('keep');
+        });
+    </script>
+</body>
+</html>
